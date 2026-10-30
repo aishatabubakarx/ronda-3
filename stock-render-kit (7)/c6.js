@@ -1,0 +1,11 @@
+C[6]=()=>{newTL();
+ const T=(x,y,th)=>{const a=lnoise(x*.9,y*.9,th,1.0),b=lnoise(x*.9+5,y*.9+3,th,1.0);const f=lnoise(x*1.2+a*.9,y*1.2+b*.9,th*2,.9),f2=lnoise(x*3.1+b,y*3.1-a,th*3,.5);return{t:.5+.5*f+.07*f2+.012*Math.sin(y*38+a*4),a,b}};
+ draw=()=>{clear();const th=LOOP(now());
+  field(256,144,(u,v)=>{const x=u*1.9,y=v*1.1,e=.018,A=T(x,y,th),Bx=T(x+e,y,th),By=T(x,y+e,th);
+    const hh=A.t*1.6+A.a*.35,l=.5+.1*Math.sin(hh*TAU*1.5),c=hs2rgb(hh*.8+.52,.5,clamp(l,.3,.68));
+    const k=Math.pow(clamp(.5+.55*A.b+.15*A.a,0,1),1.4)*.9+.06;
+    const sx=(Bx.t-A.t)/e,sy=(By.t-A.t)/e,sp=Math.max(0,(-sx*.6-sy*.8)*.55-.12),sh=clamp(sp*.9,0,.55);
+    return[8+c[0]*k+sh*255*.3,10+c[1]*k+sh*255*.3,22+c[2]*k+sh*255*.34]},1);
+  ctx.globalCompositeOperation='lighter';orb(W*.3,H*.3,520,[255,255,255],.05+.03*Math.sin(th));
+  ctx.globalCompositeOperation='source-over';const fv=ctx.createRadialGradient(W/2,H/2,H*.3,W/2,H/2,H*.95);fv.addColorStop(0,'rgba(0,0,0,0)');fv.addColorStop(1,'rgba(0,0,10,.5)');ctx.fillStyle=fv;ctx.fillRect(0,0,W,H);
+  ctx.globalAlpha=1;bloom(.35,[3,5]);vignette(.4);grain(.035)}};

@@ -1,0 +1,108 @@
+name: Render stock clips
+on:
+  workflow_dispatch:
+    inputs:
+      res:
+        description: Resolution - 1080 = 1080p, 2160 = 4K (default), 3240 = 6K, 4320 = 8K
+        type: choice
+        default: '2160'
+        options: ['1080', '2160', '3240', '4320']
+      fmt:
+        description: Container - mov (default) or mp4
+        type: choice
+        default: mov
+        options: [mp4, mov]
+      codec:
+        description: Codec (auto = mp4 -> h264, mov -> ProRes 422 HQ up to 4K, hevc above 4K)
+        type: choice
+        default: auto
+        options: [auto, h264, hevc, prores, prores4444]
+      dur:
+        description: Clip length in seconds (15 to 20)
+        default: '15'
+      parts:
+        description: Split each clip into this many frame-parts rendered in parallel (1, 2 or 4). Use 4 for 6K and 8K.
+        type: choice
+        default: '1'
+        options: ['1', '2', '4']
+      ids:
+        description: Concept ids to render, comma separated (blank = all)
+        required: false
+        default: ''
+      publish:
+        description: Where to put the finished pack (use release for 4K MOV / ProRes, 6K and 8K; artifact only suits small MP4 packs)
+        type: choice
+        default: release
+        options: [artifact, release]
+permissions:
+  contents: write
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        part: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ matrix.part < fromJSON(inputs.parts) }}
+      - uses: actions/setup-python@v5
+        if: ${{ matrix.part < fromJSON(inputs.parts) }}
+        with:
+          python-version: '3.12'
+      - name: Install ffmpeg and Chromium
+        if: ${{ matrix.part < fromJSON(inputs.parts) }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: Render this shard and part
+        if: ${{ matrix.part < fromJSON(inputs.parts) }}
+        run: python batch.py --res ${{ inputs.res }} --fmt ${{ inputs.fmt }} --codec ${{ inputs.codec }} --dur ${{ inputs.dur }} --ids "${{ inputs.ids }}" --shard ${{ matrix.shard }} --shards 8 --part ${{ matrix.part }} --parts ${{ inputs.parts }} --workers 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ matrix.part < fromJSON(inputs.parts) }}
+        with:
+          name: clips-${{ matrix.shard }}-${{ matrix.part }}
+          path: output/**
+          if-no-files-found: ignore
+          retention-days: 1
+  package:
+    needs: render
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: clips-*
+          path: output
+          merge-multiple: true
+      - run: python finalize.py output
+      - name: Upload pack as artifact
+        if: ${{ inputs.publish == 'artifact' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-pack
+          path: |
+            output/*.mp4
+            output/*.mov
+            output/*.jpg
+            output/*.csv
+            output/adobe_upload_4k/*
+      - name: Upload pack to a GitHub Release (files up to 2 GiB each, no storage quota)
+        if: ${{ inputs.publish == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          TAG="pack-${{ github.run_number }}"
+          gh release create "$TAG" --title "Stock pack $TAG" --notes "res ${{ inputs.res }}, ${{ inputs.fmt }}, ${{ inputs.codec }}, ${{ inputs.dur }}s" || true
+          FILES=(output/*.mp4 output/*.mov output/*.jpg output/*.csv output/adobe_upload_4k/*)
+          for f in "${FILES[@]}"; do gh release upload "$TAG" "$f" --clobber; done
