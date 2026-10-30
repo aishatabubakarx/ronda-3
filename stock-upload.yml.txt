@@ -1,0 +1,82 @@
+name: Upload clips to Adobe Stock and Shutterstock
+on:
+  workflow_run:
+    workflows: ["Render stock clips"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Run ID of a finished render (the number after /runs/ in the run page URL)
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: stock-upload
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download video files from the render run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        run: |
+          mkdir -p output tmp
+          names=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" --paginate --jq '.artifacts[].name' | grep -vi 'pack' || true)
+          args=""
+          for n in $names; do args="$args -n $n"; done
+          if [ -z "$args" ]; then echo "no clip artifacts in this run"; exit 0; fi
+          gh run download "$RUN_ID" -R "${{ github.repository }}" $args -D tmp
+          find tmp -type f \( -iname '*.mp4' -o -iname '*.mov' -o -iname '*.m4v' -o -iname '*.mpg' -o -iname '*.mpeg' -o -iname '*.avi' \) ! -iname '*.part.*' -exec mv -n {} output/ \;
+          # CSV files go to the repo root (not to the stock sites)
+          : > /tmp/csv_seen; n=0
+          find tmp -type f -iname '*.csv' -print0 | while IFS= read -r -d '' f; do
+            base=$(basename "$f")
+            if grep -Fxq -- "$base" /tmp/csv_seen; then n=$((n+1)); base="${n}_${base}"; fi
+            echo "$base" >> /tmp/csv_seen
+            mv -f "$f" "./$base"
+            echo "moved CSV $base to repo root"
+          done
+      - name: Upload new clips (Adobe Stock + Shutterstock)
+        env:
+          ADOBE_SFTP_HOST: ${{ secrets.ADOBE_SFTP_HOST }}
+          ADOBE_SFTP_USER: ${{ secrets.ADOBE_SFTP_USER }}
+          ADOBE_SFTP_PASS: ${{ secrets.ADOBE_SFTP_PASS }}
+          SHUTTERSTOCK_USER: ${{ secrets.SHUTTERSTOCK_USER }}
+          SHUTTERSTOCK_PASS: ${{ secrets.SHUTTERSTOCK_PASS }}
+        run: |
+          pip install paramiko
+          python stock_push.py output
+      - name: Save CSV files and upload records
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          changed=0
+          # 1) CSV files get their own commit, named after the files, so they are easy to find
+          git add -- ./*.csv 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            names=$(git diff --cached --name-only | tr '\n' ' ')
+            git commit -q -m "CSV: $names"
+            changed=1
+          fi
+          # 2) upload records are a separate commit
+          git add .adobe_uploaded 2>/dev/null || true
+          git add .shutterstock_uploaded 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -q -m "Adobe/Shutterstock upload records"
+            changed=1
+          fi
+          [ "$changed" -eq 0 ] && exit 0
+          git pull --rebase -q && git push -q
