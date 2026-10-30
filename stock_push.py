@@ -21,6 +21,11 @@ VIDEO = {'.mp4', '.mov', '.m4v', '.mpg', '.mpeg', '.avi'}
 SHUTTERSTOCK_VIDEO = {'.mp4', '.mov'}  # Shutterstock accepts .mov / .mp4
 
 
+def env(name):
+    """Read an environment variable and remove stray spaces / line breaks (a common paste problem)."""
+    return (os.environ.get(name) or '').strip()
+
+
 def done_names(rec):
     names = {p.name[:-5] for p in rec.glob('*.done')} if rec.exists() else set()
     seed = rec / 'seed.txt'
@@ -45,7 +50,7 @@ def pending(folder, rec, settle, exts):
 
 # ---------- Adobe Stock: SFTP ----------
 def adobe_creds():
-    host, user, pw = (os.environ.get(k) for k in ('ADOBE_SFTP_HOST', 'ADOBE_SFTP_USER', 'ADOBE_SFTP_PASS'))
+    host, user, pw = env('ADOBE_SFTP_HOST'), env('ADOBE_SFTP_USER'), env('ADOBE_SFTP_PASS')
     if not (host and user and pw):
         return None
     return host.replace('sftp://', '').strip('/ '), user, pw
@@ -66,10 +71,10 @@ def adobe_session(c):
 
 # ---------- Shutterstock: FTPS (explicit TLS, port 21) ----------
 def shutter_creds():
-    user, pw = os.environ.get('SHUTTERSTOCK_USER'), os.environ.get('SHUTTERSTOCK_PASS')
+    user, pw = env('SHUTTERSTOCK_USER'), env('SHUTTERSTOCK_PASS')
     if not (user and pw):
         return None
-    return os.environ.get('SHUTTERSTOCK_HOST') or 'ftps.shutterstock.com', user, pw
+    return env('SHUTTERSTOCK_HOST') or 'ftps.shutterstock.com', user, pw
 
 
 def shutter_session(c):
@@ -111,17 +116,32 @@ def run_target(name, folder, dry, settle):
             print(f'[{name}] would upload', p.name)
         return 0
     rec.mkdir(exist_ok=True)
+
+    sess = [None]  # holds (put, close) for the current connection
+
+    def connect():
+        if sess[0]:
+            try:
+                sess[0][1]()
+            except Exception:
+                pass
+            sess[0] = None
+        sess[0] = cfg['session'](c)
+
     try:
-        put, close = cfg['session'](c)
+        connect()
     except Exception as e:
         print(f'[{name}] connection failed: {e}', flush=True)
         return len(todo)
+
     fails = 0
     try:
         for p in todo:
             for attempt in range(3):
                 try:
-                    put(p)
+                    if sess[0] is None:
+                        connect()
+                    sess[0][0](p)
                     (rec / f'{p.name}.done').write_text(
                         f'{p.stat().st_size} bytes, {time.strftime("%Y-%m-%d %H:%M:%S")}\n')
                     print(f'[{name}] uploaded', p.name, flush=True)
@@ -129,10 +149,19 @@ def run_target(name, folder, dry, settle):
                 except Exception as e:
                     print(f'[{name}] retry {attempt + 1} for {p.name}: {e}', flush=True)
                     time.sleep(5)
+                    try:
+                        connect()  # fresh connection, the old one may be dead
+                    except Exception as e2:
+                        print(f'[{name}] reconnect failed: {e2}', flush=True)
+                        sess[0] = None
             else:
                 fails += 1
     finally:
-        close()
+        if sess[0]:
+            try:
+                sess[0][1]()
+            except Exception:
+                pass
     return fails
 
 
